@@ -5,6 +5,7 @@
 #include <utility>
 #include <vector>
 #include <algorithm>
+#include "response.hpp"
 
 const std::size_t MAX_BUFFER_SIZE = 16 * 1024;
 using HeadersVector = std::vector<std::pair<std::string, std::string>>;
@@ -39,6 +40,48 @@ struct ContentLength {
     std::size_t value = 0;
 };
 
+std::string RemoveSpaces(const std::string& str) {
+    std::size_t pos = 0;
+    while (pos < str.size() && std::isspace(static_cast<unsigned char>(str[pos]))) {
+        ++pos;
+    }
+
+    std::size_t end = str.size();
+    while (end > pos && std::isspace(static_cast<unsigned char>(str[end - 1]))) {
+        --end;
+    }
+
+    return str.substr(pos, end - pos);
+}
+
+std::string ToLower(const std::string& str) {
+    std::string result;
+    result.reserve(str.size());
+    for (const auto& c : str) {
+        const auto low_as_int = std::tolower(static_cast<unsigned char>(c));
+        result.push_back(static_cast<char>(low_as_int));
+    }
+    return result;
+}
+
+std::vector<std::string> SplitVectorBy(const std::string& str, char delimiter) {
+    std::vector<std::string> result;
+    std::size_t pos = 0;
+
+    while (pos != std::string::npos) {
+        const auto next_pos = str.find(delimiter, pos);
+        if (next_pos == std::string::npos) {
+            result.push_back(RemoveSpaces(str.substr(pos)));
+            break;
+        }
+
+        result.push_back(RemoveSpaces(str.substr(pos, next_pos - pos)));
+        pos = next_pos + 1;
+    }
+
+    return result;
+}
+
 class HttpConnection {
 public:
     HttpConnection(MySocket socket)
@@ -46,10 +89,30 @@ public:
     {
     }
 
+    bool HasCloseConnectionHeader(const HeadersVector& headers) const {
+        return std::any_of(headers.begin(), headers.end(), [](const auto& header) {
+            if (header.first != "connection") {
+                return false;
+            }
+
+            const auto values = SplitVectorBy(header.second, ',');
+            return std::any_of(values.begin(), values.end(), [](const auto& value) {
+                return ToLower(value) == "close";
+            });
+        });
+    }
+
     bool HasTransferEncodingHeader(const HeadersVector& headers) const {
         return std::any_of(headers.begin(), headers.end(), [](const auto& header) {
             return header.first == "transfer-encoding";
         });
+    }
+
+    void SendBadResponse(uint64_t client_id) {
+        const auto send_result = Send(HttpResponse::BadRequestResponse().ToString());
+        if (send_result.code == Code::Error) {
+            LogError("[client ", client_id, "] send failed: ", send_result.error_message);
+        }
     }
 
     ContentLength GetContentLengthHeader(const HeadersVector& headers, uint64_t client_id) const {
@@ -120,9 +183,7 @@ public:
                 LogError("Invalid header: empty name");
                 return {};
             }
-            for (char& ch : name) {
-                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            }
+            name = ToLower(name);
             auto value = header.substr(colon_pos + 1);
             const auto first = value.find_first_not_of(" \t");
             if (first == std::string::npos) {

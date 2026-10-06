@@ -1,6 +1,7 @@
 #include "connection.hpp"
 #include "constants.hpp"
 #include "logging.hpp"
+#include "response.hpp"
 #include "utils.hpp"
 #include <arpa/inet.h>
 #include <cstdint>
@@ -36,13 +37,6 @@ private:
     std::shared_ptr<ClientSlots> client_slots_;
 };
 
-void SendBadRequest(const HttpConnection& client_connection, const std::string& response, uint64_t client_id) {
-    const auto send_result = client_connection.Send(response);
-    if (send_result.code == Code::Error) {
-        LogError("[client ", client_id, "] send failed: ", send_result.error_message);
-    }
-}
-
 void LogHeaders(const HeadersVector& headers, uint64_t client_id) {
     LogInfo("[client ", client_id, "] received headers:");
     for (const auto& [key, value]: headers) {
@@ -55,7 +49,6 @@ void HandleClient(MySocket client_socket, uint64_t client_id) {
 
     Router router;
     HttpConnection client_connection(std::move(client_socket));
-
 
     LogInfo("[client ", client_id, "] waiting for message");
     const auto result = client_connection.ReceiveHeaders();
@@ -74,7 +67,7 @@ void HandleClient(MySocket client_socket, uint64_t client_id) {
     const auto parsed_headers = client_connection.ParseHeaders(result.message);
     if (!parsed_headers.valid) {
         LogError("[client ", client_id, "] invalid headers");
-        SendBadRequest(client_connection, router.GetBadRequestResponse(), client_id);
+        client_connection.SendBadResponse(client_id);
         return;
     }
 
@@ -82,37 +75,40 @@ void HandleClient(MySocket client_socket, uint64_t client_id) {
     const auto content_length_result = client_connection.GetContentLengthHeader(parsed_headers.data, client_id);
     if (!content_length_result.valid) {
         LogError("[client ", client_id, "] invalid content-length header");
-        SendBadRequest(client_connection, router.GetBadRequestResponse(), client_id);
+        client_connection.SendBadResponse(client_id);
         return;
     }
 
     if (content_length_result.value != 0) {
         LogError("[client ", client_id, "] request body is not supported");
-        SendBadRequest(client_connection, router.GetBadRequestResponse(), client_id);
+        client_connection.SendBadResponse(client_id);
         return;
     }
 
     if (client_connection.HasTransferEncodingHeader(parsed_headers.data)) {
         LogError("[client ", client_id, "] transfer-encoding is not supported");
-        SendBadRequest(client_connection, router.GetBadRequestResponse(), client_id);
+        client_connection.SendBadResponse(client_id);
         return;
     }
 
     if (!client_connection.HasValidHost(parsed_headers)) {
         LogError("[client ", client_id, "] missing, empty or duplicate Host header");
-        SendBadRequest(client_connection, router.GetBadRequestResponse(), client_id);
+        client_connection.SendBadResponse(client_id);
         return;
     }
 
     const auto request_line = client_connection.ParseRequestLine(result.message);
     if (!request_line.valid) {
         LogError("[client ", client_id, "] invalid request line");
-        SendBadRequest(client_connection, router.GetBadRequestResponse(), client_id);
+        client_connection.SendBadResponse(client_id);
         return;
     }
     LogInfo("[client ", client_id, "] request line: ", request_line.AsString());
 
-    const auto prepared_response = router.GetResponse(request_line);
+    const auto do_close = client_connection.HasCloseConnectionHeader(parsed_headers.data);
+    LogInfo("[client ", client_id, "] connection close requested: ", do_close);
+
+    const auto prepared_response = router.GetResponse(request_line).ToString();
     auto send_result = client_connection.Send(prepared_response);
     if (send_result.code == Code::Error) {
         LogError("[client ", client_id, "] send failed: ", send_result.error_message);
