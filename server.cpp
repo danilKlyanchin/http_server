@@ -16,6 +16,7 @@
 #include <thread>
 #include <unistd.h>
 #include "router.hpp"
+#include "connection.hpp"
 
 using ClientSlots = std::counting_semaphore<MAX_CONCURRENT_CLIENTS>;
 
@@ -47,75 +48,81 @@ void LogHeaders(const HeadersVector& headers, uint64_t client_id) {
 void HandleClient(MySocket client_socket, uint64_t client_id) {
     LogInfo("[client ", client_id, "] connection accepted");
 
-    Router router;
     HttpConnection client_connection(std::move(client_socket));
+    std::size_t requests_counter = 0;
+    while (true) {
+        LogInfo("[client ", client_id, "] waiting for message #", requests_counter + 1, "");
+        const auto result = client_connection.ReceiveHeaders();
+        if (result.code == Code::Error) {
+            LogError("[client ", client_id, "] failed to receive headers: ", result.error_message);
+            return;
+        }
+        if (result.code == Code::Disconnected) {
+            LogInfo("[client ", client_id, "] disconnected");
+            return;
+        }
 
-    LogInfo("[client ", client_id, "] waiting for message");
-    const auto result = client_connection.ReceiveHeaders();
-    if (result.code == Code::Error) {
-        LogError("[client ", client_id, "] failed to receive headers: ", result.error_message);
-        return;
-    }
-    if (result.code == Code::Disconnected) {
-        LogInfo("[client ", client_id, "] disconnected");
-        return;
-    }
+        LogInfo("[client ", client_id, "] received headers bytes=", result.message.size());
 
-    LogInfo("[client ", client_id, "] received headers bytes=", result.message.size());
-    LogInfo("[client ", client_id, "] received headers:\n", result.message);
+        const auto parsed_headers = client_connection.ParseHeaders(result.message);
+        if (!parsed_headers.valid) {
+            LogError("[client ", client_id, "] invalid headers");
+            client_connection.SendBadResponse(client_id);
+            return;
+        }
 
-    const auto parsed_headers = client_connection.ParseHeaders(result.message);
-    if (!parsed_headers.valid) {
-        LogError("[client ", client_id, "] invalid headers");
-        client_connection.SendBadResponse(client_id);
-        return;
-    }
+        LogHeaders(parsed_headers.data, client_id);
+        const auto content_length_result = client_connection.GetContentLengthHeader(parsed_headers.data, client_id);
+        if (!content_length_result.valid) {
+            LogError("[client ", client_id, "] invalid content-length header");
+            client_connection.SendBadResponse(client_id);
+            return;
+        }
 
-    LogHeaders(parsed_headers.data, client_id);
-    const auto content_length_result = client_connection.GetContentLengthHeader(parsed_headers.data, client_id);
-    if (!content_length_result.valid) {
-        LogError("[client ", client_id, "] invalid content-length header");
-        client_connection.SendBadResponse(client_id);
-        return;
-    }
+        if (content_length_result.value != 0) {
+            LogError("[client ", client_id, "] request body is not supported");
+            client_connection.SendBadResponse(client_id);
+            return;
+        }
 
-    if (content_length_result.value != 0) {
-        LogError("[client ", client_id, "] request body is not supported");
-        client_connection.SendBadResponse(client_id);
-        return;
-    }
+        if (client_connection.HasTransferEncodingHeader(parsed_headers.data)) {
+            LogError("[client ", client_id, "] transfer-encoding is not supported");
+            client_connection.SendBadResponse(client_id);
+            return;
+        }
 
-    if (client_connection.HasTransferEncodingHeader(parsed_headers.data)) {
-        LogError("[client ", client_id, "] transfer-encoding is not supported");
-        client_connection.SendBadResponse(client_id);
-        return;
-    }
+        if (!client_connection.HasValidHost(parsed_headers)) {
+            LogError("[client ", client_id, "] missing, empty or duplicate Host header");
+            client_connection.SendBadResponse(client_id);
+            return;
+        }
 
-    if (!client_connection.HasValidHost(parsed_headers)) {
-        LogError("[client ", client_id, "] missing, empty or duplicate Host header");
-        client_connection.SendBadResponse(client_id);
-        return;
-    }
+        const auto request_line = client_connection.ParseRequestLine(result.message);
+        if (!request_line.valid) {
+            LogError("[client ", client_id, "] invalid request line");
+            client_connection.SendBadResponse(client_id);
+            return;
+        }
+        LogInfo("[client ", client_id, "] request line: ", request_line.AsString());
 
-    const auto request_line = client_connection.ParseRequestLine(result.message);
-    if (!request_line.valid) {
-        LogError("[client ", client_id, "] invalid request line");
-        client_connection.SendBadResponse(client_id);
-        return;
-    }
-    LogInfo("[client ", client_id, "] request line: ", request_line.AsString());
+        const auto do_close = client_connection.HasCloseConnectionHeader(parsed_headers.data);
+        LogInfo("[client ", client_id, "] connection close requested: ", do_close);
 
-    const auto do_close = client_connection.HasCloseConnectionHeader(parsed_headers.data);
-    LogInfo("[client ", client_id, "] connection close requested: ", do_close);
+        Router router(do_close);
+        const auto prepared_response = router.GetResponse(request_line).ToString();
+        auto send_result = client_connection.Send(prepared_response);
+        if (send_result.code == Code::Error) {
+            LogError("[client ", client_id, "] send failed: ", send_result.error_message);
+            return;
+        }
 
-    const auto prepared_response = router.GetResponse(request_line).ToString();
-    auto send_result = client_connection.Send(prepared_response);
-    if (send_result.code == Code::Error) {
-        LogError("[client ", client_id, "] send failed: ", send_result.error_message);
-        return;
-    }
-
-    LogInfo("[client ", client_id, "] sent response response bytes=", prepared_response.size());
+        LogInfo("[client ", client_id, "] sent response response bytes=", prepared_response.size());
+        ++requests_counter;
+        if (do_close) {
+            LogInfo("[client ", client_id, "] closing connection due to close header");
+            break;
+        }
+    } // end of while loop
 }
 
 void HandleClientSafely(MySocket client_socket,

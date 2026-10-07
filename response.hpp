@@ -11,29 +11,30 @@ public:
         , headers_(initial_headers)
         , body_(body)
     {
-        PrepareHeaders();
+        PrepareBaseHeaders();
     }
 
     std::string ToString() const {
         return fmt::format("HTTP/1.1 {} {}\r\n{}\r\n{}", status_code_, status_message_, headers_, body_);
     }
 
-    static HttpResponse BadRequestResponse() {
-        return HttpResponse(400, "Bad Request", "Bad request");
+    static HttpResponse BadRequestResponse(std::string initial_headers = "") {
+        initial_headers += "Connection: close\r\n";
+        return HttpResponse(400, "Bad Request", "Bad request", initial_headers);
     }
 
-    static HttpResponse NotFoundResponse() {
-        return HttpResponse(404, "Not Found", "Not found");
+    static HttpResponse NotFoundResponse(std::string initial_headers = "") {
+        return HttpResponse(404, "Not Found", "Not found", initial_headers);
     }
 
-    static HttpResponse NotAllowedResponse() {
-        return HttpResponse(405, "Method not allowed", "Method not allowed", "Allow: GET\r\n");
+    static HttpResponse NotAllowedResponse(std::string initial_headers = "") {
+        initial_headers += "Allow: GET\r\n";
+        return HttpResponse(405, "Method Not Allowed", "Method Not Allowed", initial_headers);
     }
 
 private:
-    void PrepareHeaders() {
+    void PrepareBaseHeaders() {
         headers_ += "Content-Type: text/plain; charset=utf-8\r\n";
-        headers_ += "Connection: close\r\n";
         headers_ += "Content-Length: " + std::to_string(body_.size()) + "\r\n";
     }
 

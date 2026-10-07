@@ -1,22 +1,27 @@
 #pragma once
 
 #include "response.hpp"
+#include "connection.hpp"
 
 class Router{
 public:
-    Router() = default;
-    ~Router() = default;
-    Router(const Router&) = delete;
-    Router& operator=(const Router&) = delete;
+    Router(bool client_has_close_header)
+        : client_has_close_header_(client_has_close_header)
+        {};
 
     HttpResponse GetResponse(const HttpRequestLine& request_line) {
         if (!IsKnownPath(request_line.path)) {
-            return HttpResponse::NotFoundResponse();
+            return HttpResponse::NotFoundResponse(GetAdditionalHeaders());
         }
         if (request_line.method != "GET") {
-            return HttpResponse::NotAllowedResponse();
+            return HttpResponse::NotAllowedResponse(GetAdditionalHeaders());
         }
-        return HttpResponse(200, "OK", GetBodyPyPath(request_line.path));
+        return HttpResponse(
+            200,
+            "OK",
+            GetBodyPyPath(request_line.path),
+            GetAdditionalHeaders()
+        );
     }
 
 private:
@@ -33,4 +38,13 @@ private:
         }
         throw std::runtime_error("Unknown path");
     }
+
+    std::string GetAdditionalHeaders() {
+        if (client_has_close_header_) {
+            return "Connection: close\r\n";
+        }
+        return "";
+    }
+
+    const bool client_has_close_header_;
 };
